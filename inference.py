@@ -80,6 +80,132 @@ def _decode_record(record, name_to_features):
 
   return example
 
+def model_fn_builder(bert_config, init_checkpoint, learning_rate,
+                     num_train_steps, num_warmup_steps, use_tpu,
+                     use_one_hot_embeddings):
+  """Returns `model_fn` closure for TPUEstimator."""
+
+  def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
+    """The `model_fn` for TPUEstimator."""
+
+
+    input_ids = features["input_ids"]
+    input_mask = features["input_mask"]
+    segment_ids = features["segment_ids"]
+    masked_lm_positions = features["masked_lm_positions"]
+    masked_lm_ids = features["masked_lm_ids"]
+    masked_lm_weights = features["masked_lm_weights"]
+    energy_level_labels = features["energy_level_labels"]
+
+    is_training = (mode == tf.estimator.ModeKeys.TRAIN)
+
+    model = modeling.BertModel(
+        config=bert_config,
+        is_training=is_training,
+        input_ids=input_ids,
+        input_mask=input_mask,
+        token_type_ids=segment_ids,
+        use_one_hot_embeddings=use_one_hot_embeddings)
+
+    (masked_lm_loss,
+     masked_lm_example_loss, masked_lm_log_probs) = get_masked_lm_output(
+         bert_config, model.get_sequence_output(), model.get_embedding_table(),
+         masked_lm_positions, masked_lm_ids, masked_lm_weights)
+
+    (energy_level_loss, energy_level_example_loss,
+     energy_level_log_probs) = get_energy_level_output(
+         bert_config, model.get_pooled_output(), energy_level_labels)
+
+    total_loss = masked_lm_loss + energy_level_loss
+
+    tvars = tf.trainable_variables()
+
+    initialized_variable_names = {}
+    scaffold_fn = None
+    if init_checkpoint:
+      (assignment_map, initialized_variable_names
+      ) = modeling.get_assignment_map_from_checkpoint(tvars, init_checkpoint)
+      if use_tpu:
+
+        def tpu_scaffold():
+          tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
+          return tf.train.Scaffold()
+
+        scaffold_fn = tpu_scaffold
+      else:
+        tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
+
+    tf.logging.info("**** Trainable Variables ****")
+    for var in tvars:
+      init_string = ""
+      if var.name in initialized_variable_names:
+        init_string = ", *INIT_FROM_CKPT*"
+      tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
+                      init_string)
+
+    output_spec = None
+    if mode == tf.estimator.ModeKeys.TRAIN:
+      train_op = optimization.create_optimizer(
+          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
+
+      output_spec = tf.contrib.tpu.TPUEstimatorSpec(
+          mode=mode,
+          loss=total_loss,
+          train_op=train_op,
+          scaffold_fn=scaffold_fn)
+    elif mode == tf.estimator.ModeKeys.EVAL:
+
+      def metric_fn(masked_lm_example_loss, masked_lm_log_probs, masked_lm_ids,
+                    masked_lm_weights, energy_level_example_loss,
+                    energy_level_log_probs, energy_level_labels):
+        """Computes the loss and accuracy of the model."""
+        masked_lm_log_probs = tf.reshape(masked_lm_log_probs,
+                                         [-1, masked_lm_log_probs.shape[-1]])
+        masked_lm_predictions = tf.argmax(
+            masked_lm_log_probs, axis=-1, output_type=tf.int32)
+        masked_lm_example_loss = tf.reshape(masked_lm_example_loss, [-1])
+        masked_lm_ids = tf.reshape(masked_lm_ids, [-1])
+        masked_lm_weights = tf.reshape(masked_lm_weights, [-1])
+        masked_lm_accuracy = tf.metrics.accuracy(
+            labels=masked_lm_ids,
+            predictions=masked_lm_predictions,
+            weights=masked_lm_weights)
+        masked_lm_mean_loss = tf.metrics.mean(
+            values=masked_lm_example_loss, weights=masked_lm_weights)
+
+        energy_level_log_probs = tf.reshape(
+            energy_level_log_probs, [-1, energy_level_log_probs.shape[-1]])
+        energy_level_predictions = tf.argmax(
+            energy_level_log_probs, axis=-1, output_type=tf.int32)
+        energy_level_labels = tf.reshape(energy_level_labels, [-1])
+        energy_level_accuracy = tf.metrics.accuracy(
+            labels=energy_level_labels, predictions=energy_level_predictions)
+        energy_level_mean_loss = tf.metrics.mean(
+            values=energy_level_example_loss)
+
+        return {
+            "masked_lm_accuracy": masked_lm_accuracy,
+            "masked_lm_loss": masked_lm_mean_loss,
+            "energy_level_accuracy": energy_level_accuracy,
+            "energy_level_loss": energy_level_mean_loss,
+        }
+
+      eval_metrics = (metric_fn, [
+          masked_lm_example_loss, masked_lm_log_probs, masked_lm_ids,
+          masked_lm_weights, energy_level_example_loss,
+          energy_level_log_probs, energy_level_labels
+      ])
+      output_spec = tf.contrib.tpu.TPUEstimatorSpec(
+          mode=mode,
+          loss=total_loss,
+          eval_metrics=eval_metrics,
+          scaffold_fn=scaffold_fn)
+    else:
+      raise ValueError("Only TRAIN and EVAL modes are supported: %s" % (mode))
+
+    return output_spec
+
+  return model_fn
 bert_config = modeling.BertConfig.from_json_file(options.config_path)
 
 input_files = []
@@ -97,10 +223,10 @@ run_config = tf.contrib.tpu.RunConfig(
   cluster=tpu_cluster_resolver,
   master=None,
   model_dir="test",
-  save_checkpoints_steps=None,
+  save_checkpoints_steps=1000,
   tpu_config=tf.contrib.tpu.TPUConfig(
-      iterations_per_loop=None,
-      num_shards=None,
+      iterations_per_loop=1000,
+      num_shards=8,
       per_host_input_for_training=is_per_host))
 
 model_fn = model_fn_builder(
@@ -116,13 +242,13 @@ estimator = tf.contrib.tpu.TPUEstimator(
   use_tpu=False,
   model_fn=model_fn,
   config=run_config,
-  train_batch_size=FLAGS.train_batch_size,
-  eval_batch_size=FLAGS.eval_batch_size)
+  train_batch_size=32,
+  )
 
 
 model = modeling.BertModel(
     config=bert_config,
-    is_training=is_training,
+    is_training=False,
     input_ids=input_ids,
     input_mask=input_mask,
     token_type_ids=segment_ids,

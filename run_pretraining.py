@@ -276,6 +276,33 @@ def get_masked_lm_output(bert_config, input_tensor, output_weights, positions,
     # tensor has a value of 1.0 for every real prediction and 0.0 for the
     # padding predictions.
     per_example_loss = -tf.reduce_sum(log_probs * one_hot_labels, axis=[-1])
+    print(one_hot_labels)
+    print(label_ids)
+    print(label_weights)
+    tf.print(one_hot_labels)
+    with tf.Session() as sess:
+        print(sess.run(one_hot_labels))
+    with tf.Session() as sess:
+        numpy_array = sess.run(label_ids)  # 텐서를 평가하여 numpy 배열로 변환
+        print(numpy_array)
+        exit()
+
+    # one_hot_labels에서 원본 label_id를 다시 추출
+    recovered_label_ids = tf.argmax(one_hot_labels, axis=-1)
+
+    # 세션을 사용하여 평가
+    with tf.Session() as sess:
+        
+        one_hot_labels_value, recovered_label_ids_value = sess.run(
+            [one_hot_labels, recovered_label_ids],
+            feed_dict={label_ids: label_ids}
+        )
+        
+        # 출력
+        print("One-hot Labels:\n", one_hot_labels_value)
+        print("Recovered Label IDs:", recovered_label_ids_value)
+
+    exit()
     numerator = tf.reduce_sum(label_weights * per_example_loss)
     denominator = tf.reduce_sum(label_weights) + 1e-5
     loss = numerator / denominator

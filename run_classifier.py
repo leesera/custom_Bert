@@ -255,6 +255,8 @@ class XnliProcessor(DataProcessor):
 class MnliProcessor(DataProcessor):
   """Processor for the MultiNLI data set (GLUE version)."""
 
+
+
   def get_train_examples(self, data_dir):
     """See base class."""
     return self._create_examples(
@@ -279,9 +281,6 @@ class MnliProcessor(DataProcessor):
     """Creates examples for the training and dev sets."""
     examples = []
     for (i, line) in enumerate(lines):
-      if i == 0:
-        continue
-      guid = "%s-%s" % (set_type, tokenization.convert_to_unicode(line[0]))
       text_a = tokenization.convert_to_unicode(line[8])
       text_b = tokenization.convert_to_unicode(line[9])
       if set_type == "test":
@@ -332,6 +331,49 @@ class MrpcProcessor(DataProcessor):
           InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
     return examples
 
+class SolProcessor(DataProcessor):
+
+  def _read_lines(self,path):
+      return open(path).readlines()
+
+  def _parse_line(self, line):
+      words = line.split(" ")
+      if not words:
+          return "", ""
+
+      text = " ".join(words[:-1])
+      label = words[-1].strip()
+      return text, label
+
+  def get_train_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_lines(os.path.join(data_dir, "train.txt")), "train")
+
+  def get_dev_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_lines(os.path.join(data_dir, "eval.txt")), "dev")
+
+  def get_test_examples(self, data_dir):
+    """See base class."""
+    return self._create_examples(
+        self._read_lines(os.path.join(data_dir, "test.txt")), "test")
+
+  def get_labels(self):
+    """See base class."""
+    return ["one","two","three","four"]
+
+  def _create_examples(self, lines, set_type):
+    """Creates examples for the training and dev sets."""
+    examples = []
+    for (i, line) in enumerate(lines):
+      guid = "%s-%s" % (set_type, i)
+      text_a, label = self._parse_line(line)
+      if text_a:
+          examples.append(
+              InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
+    return examples
 
 class ColaProcessor(DataProcessor):
   """Processor for the CoLA data set (GLUE version)."""
@@ -784,6 +826,7 @@ def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
 
   processors = {
+      "sol": SolProcessor,
       "cola": ColaProcessor,
       "mnli": MnliProcessor,
       "mrpc": MrpcProcessor,
